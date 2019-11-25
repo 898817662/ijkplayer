@@ -20,6 +20,7 @@ package tv.danmaku.ijk.media.player;
 
 import android.annotation.TargetApi;
 import android.content.Context;
+import android.graphics.Bitmap;
 import android.media.AudioManager;
 import android.media.MediaDataSource;
 import android.media.MediaPlayer;
@@ -434,4 +435,18 @@ public class AndroidMediaPlayer extends AbstractMediaPlayer {
             notifyOnTimedText(ijkText);
         }
     }
+
+
+
+    /**
+     * 录制视频相关 =========================================================================
+     */
+    @Override
+    public native int startRecord(String file);
+
+    @Override
+    public native int stopRecord();
+
+    @Override
+    public native boolean getCurrentFrame(Bitmap bitmap);
 }

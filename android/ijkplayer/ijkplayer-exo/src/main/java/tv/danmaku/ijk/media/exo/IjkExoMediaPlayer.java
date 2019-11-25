@@ -18,6 +18,7 @@
 package tv.danmaku.ijk.media.exo;
 
 import android.content.Context;
+import android.graphics.Bitmap;
 import android.net.Uri;
 import android.view.Surface;
 import android.view.SurfaceHolder;
@@ -29,12 +30,12 @@ import java.io.FileDescriptor;
 import java.util.Map;
 
 import tv.danmaku.ijk.media.exo.demo.EventLogger;
+import tv.danmaku.ijk.media.exo.demo.SmoothStreamingTestMediaDrmCallback;
 import tv.danmaku.ijk.media.exo.demo.player.DemoPlayer;
 import tv.danmaku.ijk.media.exo.demo.player.DemoPlayer.RendererBuilder;
 import tv.danmaku.ijk.media.exo.demo.player.ExtractorRendererBuilder;
 import tv.danmaku.ijk.media.exo.demo.player.HlsRendererBuilder;
 import tv.danmaku.ijk.media.exo.demo.player.SmoothStreamingRendererBuilder;
-import tv.danmaku.ijk.media.exo.demo.SmoothStreamingTestMediaDrmCallback;
 import tv.danmaku.ijk.media.player.AbstractMediaPlayer;
 import tv.danmaku.ijk.media.player.IMediaPlayer;
 import tv.danmaku.ijk.media.player.MediaInfo;
@@ -397,4 +398,16 @@ public class IjkExoMediaPlayer extends AbstractMediaPlayer {
     }
 
     private DemoPlayerListener mDemoListener;
+
+    /**
+     * 录制视频相关 =========================================================================
+     */
+    @Override
+    public native int startRecord(String file);
+
+    @Override
+    public native int stopRecord();
+
+    @Override
+    public native boolean getCurrentFrame(Bitmap bitmap);
 }
