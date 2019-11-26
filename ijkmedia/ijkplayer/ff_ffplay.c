@@ -3078,6 +3078,8 @@ static int read_thread(void *arg)
     int64_t io_tick_counter = 0;
     int init_ijkmeta = 0;
 
+    int64_t recordTs;
+
     if (!wait_mutex) {
         av_log(NULL, AV_LOG_FATAL, "SDL_CreateMutex(): %s\n", SDL_GetError());
         ret = AVERROR(ENOMEM);
@@ -3618,6 +3620,20 @@ static int read_thread(void *arg)
                     prev_io_tick_counter = io_tick_counter;
                     ffp_check_buffering_l(ffp);
                 }
+            }
+        }
+        //av_log(ffp, AV_LOG_INFO, "common pkt->pts:%ld",pkt->pts);
+        //av_log(ffp, AV_LOG_INFO, "common pkt->dts:%ld",pkt->dts);
+
+		if (!ffp->is_first && pkt->pts == pkt->dts) { // 获取开始录制前dts等于pts最后的值，用于
+            //ffp->start_pts = pkt->pts;
+            //ffp->start_dts = pkt->dts;
+        }
+        if (ffp->is_record) { // 可以录制时，写入文件
+            recordTs++;
+            if (0 != ffp_record_file(ffp, pkt,recordTs)) {
+                ffp->record_error = 1;
+                ffp_stop_record(ffp);
             }
         }
     }
@@ -5038,33 +5054,7 @@ IjkMediaMeta *ffp_get_meta_l(FFPlayer *ffp)
     return ffp->meta;
 }
 
-
-void ffp_get_current_frame_l(FFPlayer *ffp, uint8_t *frame_buf)
-{
-  ALOGD("=============>start snapshot\n");
-
-  VideoState *is = ffp->is;
-  Frame *vp;
-  int i = 0, linesize = 0, pixels = 0;
-  uint8_t *src;
-
-  vp = &is->pictq.queue[is->pictq.rindex];
-  int height = vp->bmp->h;
-  int width = vp->bmp->w;
-
-  ALOGD("=============>%d X %d === %d\n", width, height, vp->bmp->pitches[0]);
-
-  // copy data to bitmap in java code
-  linesize = vp->bmp->pitches[0];
-  src = vp->bmp->pixels[0];
-  pixels = width * 4;
-  for (i = 0; i < height; i++) {
-      memcpy(frame_buf + i * pixels, src + i * linesize, pixels);
-  }
-
-  ALOGD("=============>end snapshot\n");
-}
-
+//开始录制函数:file_name是保存路径
 int ffp_start_record(FFPlayer *ffp, const char *file_name)
 {
     assert(ffp);
@@ -5092,7 +5082,7 @@ int ffp_start_record(FFPlayer *ffp, const char *file_name)
     }
 
     // 初始化一个用于输出的AVFormatContext结构体
-    avformat_alloc_output_context2(&ffp->m_ofmt_ctx, NULL, "mp4", file_name);
+    avformat_alloc_output_context2(&ffp->m_ofmt_ctx, NULL, NULL, file_name);
     if (!ffp->m_ofmt_ctx) {
         av_log(ffp, AV_LOG_ERROR, "Could not create output context filename is %s\n", file_name);
         goto end;
@@ -5101,24 +5091,28 @@ int ffp_start_record(FFPlayer *ffp, const char *file_name)
 
     for (int i = 0; i < is->ic->nb_streams; i++) {
         // 对照输入流创建输出流通道
+        AVStream *out_stream;
         AVStream *in_stream = is->ic->streams[i];
-        AVStream *out_stream = avformat_new_stream(ffp->m_ofmt_ctx, in_stream->codec->codec);
+	AVCodecParameters *in_codecpar = in_stream->codecpar;
+
+	if (in_codecpar->codec_type != AVMEDIA_TYPE_AUDIO &&
+            in_codecpar->codec_type != AVMEDIA_TYPE_VIDEO &&
+            in_codecpar->codec_type != AVMEDIA_TYPE_SUBTITLE) {
+            continue;
+        }
+
+	out_stream = avformat_new_stream(ffp->m_ofmt_ctx, NULL);
         if (!out_stream) {
             av_log(ffp, AV_LOG_ERROR, "Failed allocating output stream\n");
             goto end;
         }
 
         // 将输入视频/音频的参数拷贝至输出视频/音频的AVCodecContext结构体
-        av_log(ffp, AV_LOG_DEBUG, "in_stream->codec；%@\n", in_stream->codec);
-        if (avcodec_copy_context(out_stream->codec, in_stream->codec) < 0) {
-            av_log(ffp, AV_LOG_ERROR, "Failed to copy context from input to output stream codec context\n");
+	if (avcodec_parameters_copy(out_stream->codecpar, in_codecpar) < 0) {
+            av_log(ffp, AV_LOG_ERROR, "Failed to copy codec parameters\n");
             goto end;
         }
-
-        out_stream->codec->codec_tag = 0;
-        if (ffp->m_ofmt_ctx->oformat->flags & AVFMT_GLOBALHEADER) {
-            out_stream->codec->flags |= CODEC_FLAG_GLOBAL_HEADER;
-        }
+        out_stream->codecpar->codec_tag = 0;
     }
 
     av_dump_format(ffp->m_ofmt_ctx, 0, file_name, 1);
@@ -5147,59 +5141,7 @@ end:
     return -1;
 }
 
-int ffp_record_file(FFPlayer *ffp, AVPacket *packet)
-{
-    assert(ffp);
-    VideoState *is = ffp->is;
-    int ret = 0;
-    AVStream *in_stream;
-    AVStream *out_stream;
-
-    if (ffp->is_record) {
-        if (packet == NULL) {
-            ffp->record_error = 1;
-            av_log(ffp, AV_LOG_ERROR, "packet == NULL");
-            return -1;
-        }
-
-        AVPacket *pkt = (AVPacket *)av_malloc(sizeof(AVPacket)); // 与看直播的 AVPacket分开，不然卡屏
-        av_new_packet(pkt, 0);
-        if (0 == av_packet_ref(pkt, packet)) {
-            pthread_mutex_lock(&ffp->record_mutex);
-
-            if (!ffp->is_first) { // 录制的第一帧，时间从0开始
-                ffp->is_first = 1;
-                pkt->pts = 0;
-                pkt->dts = 0;
-            } else { // 之后的每一帧都要减去，点击开始录制时的值，这样的时间才是正确的
-                pkt->pts = abs(pkt->pts - ffp->start_pts);
-                pkt->dts = abs(pkt->dts - ffp->start_dts);
-            }
-
-            in_stream  = is->ic->streams[pkt->stream_index];
-            out_stream = ffp->m_ofmt_ctx->streams[pkt->stream_index];
-
-            // 转换PTS/DTS
-            pkt->pts = av_rescale_q_rnd(pkt->pts, in_stream->time_base, out_stream->time_base, (AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
-            pkt->dts = av_rescale_q_rnd(pkt->dts, in_stream->time_base, out_stream->time_base, (AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
-            pkt->duration = av_rescale_q(pkt->duration, in_stream->time_base, out_stream->time_base);
-            pkt->pos = -1;
-
-            // 写入一个AVPacket到输出文件
-            if ((ret = av_interleaved_write_frame(ffp->m_ofmt_ctx, pkt)) < 0) {
-                av_log(ffp, AV_LOG_ERROR, "Error muxing packet\n");
-            }
-
-            av_packet_unref(pkt);
-            pthread_mutex_unlock(&ffp->record_mutex);
-        } else {
-            av_log(ffp, AV_LOG_ERROR, "av_packet_ref == NULL");
-        }
-    }
-    return ret;
-}
-
-
+//停止录播
 int ffp_stop_record(FFPlayer *ffp)
 {
     assert(ffp);
@@ -5222,4 +5164,102 @@ int ffp_stop_record(FFPlayer *ffp)
         av_log(ffp, AV_LOG_ERROR, "don't need stopRecord\n");
     }
     return 0;
+}
+
+
+//保存文件
+int ffp_record_file(FFPlayer *ffp, AVPacket *packet,int64_t recordTs)
+{
+    assert(ffp);
+    VideoState *is = ffp->is;
+    int ret = 0;
+    AVStream *in_stream;
+    AVStream *out_stream;
+
+    if (ffp->is_record) {
+        if (packet == NULL) {
+            ffp->record_error = 1;
+            av_log(ffp, AV_LOG_ERROR, "packet == NULL");
+            return -1;
+        }
+
+        AVPacket *pkt = (AVPacket *)av_malloc(sizeof(AVPacket)); // 与看直播的 AVPacket分开，不然卡屏
+        av_new_packet(pkt, 0);
+        if (0 == av_packet_ref(pkt, packet)) {
+            pthread_mutex_lock(&ffp->record_mutex);
+
+            av_log(ffp, AV_LOG_INFO, "ffp->start_pts:%"PRId64"",ffp->start_pts);
+            av_log(ffp, AV_LOG_INFO, "ffp->start_dts:%"PRId64"",ffp->start_dts);
+
+            av_log(ffp, AV_LOG_INFO, "ffp->is_first:%"PRId64"",ffp->is_first);
+            if (!ffp->is_first) { // 录制的第一帧，时间从0开始
+                ffp->is_first = 1;
+                pkt->pts = 0;
+                pkt->dts = 0;
+            } else { // 之后的每一帧都要减去，点击开始录制时的值，这样的时间才是正确的
+                pkt->pts = abs(pkt->pts - ffp->start_pts);
+                pkt->dts = abs(pkt->dts - ffp->start_dts);
+            }
+
+            av_log(ffp, AV_LOG_INFO, "recordPts:%"PRId64"",recordTs);
+            av_log(ffp, AV_LOG_INFO, "recordDts:%"PRId64"",recordTs);
+
+            pkt->pts = recordTs;
+            pkt->dts = recordTs;
+
+            in_stream  = is->ic->streams[pkt->stream_index];
+            out_stream = ffp->m_ofmt_ctx->streams[pkt->stream_index];
+
+            // 转换PTS/DTS
+            pkt->pts = av_rescale_q_rnd(pkt->pts, in_stream->time_base, out_stream->time_base, (AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
+            pkt->dts = av_rescale_q_rnd(pkt->dts, in_stream->time_base, out_stream->time_base, (AV_ROUND_NEAR_INF|AV_ROUND_PASS_MINMAX));
+            pkt->duration = av_rescale_q(pkt->duration, in_stream->time_base, out_stream->time_base);
+
+            pkt->pos = -1;
+
+
+            av_log(ffp, AV_LOG_INFO, "inner pkt->pts:%"PRId64"",pkt->pts);
+            av_log(ffp, AV_LOG_INFO, "inner pkt->dts:%"PRId64"",pkt->dts);
+            av_log(ffp, AV_LOG_INFO, "inner pkt->duration:%"PRId64"",pkt->duration);
+
+
+            av_log(ffp, AV_LOG_INFO, "av_interleaved_write_frame\n");
+            // 写入一个AVPacket到输出文件
+            if ((ret = av_interleaved_write_frame(ffp->m_ofmt_ctx, pkt)) < 0) {
+                av_log(ffp, AV_LOG_ERROR, "Error muxing packet\n");
+            }
+            av_packet_unref(pkt);
+            pthread_mutex_unlock(&ffp->record_mutex);
+        } else {
+            av_log(ffp, AV_LOG_ERROR, "av_packet_ref == NULL");
+        }
+    }
+    return ret;
+}
+
+//截图
+void ffp_get_current_frame_l(FFPlayer *ffp, uint8_t *frame_buf)
+{
+  ALOGD("=============>start snapshot\n");
+
+  VideoState *is = ffp->is;
+  Frame *vp;
+  int i = 0, linesize = 0, pixels = 0;
+  uint8_t *src;
+
+  vp = &is->pictq.queue[is->pictq.rindex];
+  int height = vp->bmp->h;
+  int width = vp->bmp->w;
+
+  ALOGD("=============>%d X %d === %d\n", width, height, vp->bmp->pitches[0]);
+
+  // copy data to bitmap in java code
+  linesize = vp->bmp->pitches[0];
+  src = vp->bmp->pixels[0];
+  pixels = width * 4;
+  for (i = 0; i < height; i++) {
+      memcpy(frame_buf + i * pixels, src + i * linesize, pixels);
+  }
+
+  ALOGD("=============>end snapshot\n");
 }
